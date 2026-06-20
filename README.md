@@ -31,7 +31,10 @@ cargo build --release
 cargo test
 
 # Ported SQLite regression tests
-cargo run -p sqllite-tests -- tests/basic.test -v
+cargo run -p sqllite-tests -- tests -v
+
+# Or via Makefile
+make test-sqlite
 ```
 
 ## CLI Usage

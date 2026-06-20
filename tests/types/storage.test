@@ -1,0 +1,39 @@
+# Type storage tests (simplified from SQLite test/affinity2.test — no typeof/CAST)
+
+reset_db
+
+do_execsql_test types-int-1 {
+  CREATE TABLE t_int(xi INTEGER);
+  INSERT INTO t_int VALUES(42);
+  SELECT xi FROM t_int;
+} {42}
+
+do_execsql_test types-text-1 {
+  CREATE TABLE t_text(xt TEXT);
+  INSERT INTO t_text VALUES('hello');
+  SELECT xt FROM t_text;
+} {hello}
+
+do_execsql_test types-real-1 {
+  CREATE TABLE t_real(xr REAL);
+  INSERT INTO t_real VALUES(3.5);
+  SELECT xr FROM t_real;
+} {3.5}
+
+do_execsql_test types-mixed-1 {
+  CREATE TABLE t_mixed(a INTEGER, b TEXT, c REAL);
+  INSERT INTO t_mixed VALUES(1, 'two', 3.0);
+  SELECT a, b, c FROM t_mixed;
+} {1 two 3.0}
+
+do_execsql_test types-null-1 {
+  CREATE TABLE t_null(a int, b int);
+  INSERT INTO t_null(a) VALUES(1);
+  SELECT a, b FROM t_null;
+} {1 {}}
+
+do_execsql_test types-text-int-1 {
+  CREATE TABLE t_txtnum(x TEXT);
+  INSERT INTO t_txtnum VALUES(123);
+  SELECT x FROM t_txtnum;
+} {123}

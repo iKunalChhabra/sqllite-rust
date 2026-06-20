@@ -1,0 +1,40 @@
+# DELETE tests ported from SQLite test/delete.test
+
+reset_db
+
+do_test delete-1.1 {
+  set v [catch {execsql {DELETE FROM test1}} msg]
+  lappend v $msg
+} {1 {no such table: test1}}
+
+do_test delete-3.1.1 {
+  execsql {CREATE TABLE table1(f1 int, f2 int)}
+  execsql {INSERT INTO table1 VALUES(1,2)}
+  execsql {INSERT INTO table1 VALUES(2,4)}
+  execsql {INSERT INTO table1 VALUES(3,8)}
+  execsql {INSERT INTO table1 VALUES(4,16)}
+  execsql {SELECT * FROM table1}
+} {1 2 2 4 3 8 4 16}
+
+do_test delete-3.1.2 {
+  execsql {DELETE FROM table1 WHERE f1=3}
+} {}
+
+do_test delete-3.1.3 {
+  execsql {SELECT * FROM table1}
+} {1 2 2 4 4 16}
+
+do_test delete-3.1.6.1 {
+  execsql {DELETE FROM table1 WHERE f1=2}
+} {}
+
+do_test delete-3.1.7 {
+  execsql {SELECT * FROM table1}
+} {1 2 4 16}
+
+do_test delete-all {
+  execsql {CREATE TABLE empty_t(v int)}
+  execsql {INSERT INTO empty_t VALUES(1)}
+  execsql {DELETE FROM empty_t}
+  execsql {SELECT v FROM empty_t}
+} {}

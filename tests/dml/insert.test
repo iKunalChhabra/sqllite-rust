@@ -1,0 +1,37 @@
+# INSERT tests ported from SQLite test/insert.test
+
+do_test insert-1.1 {
+  set v [catch {execsql {INSERT INTO test1 VALUES(1,2,3)}} msg]
+  lappend v $msg
+} {1 {no such table: test1}}
+
+do_test insert-1.3 {
+  execsql {CREATE TABLE test1(one int, two int, three int)}
+  set v [catch {execsql {INSERT INTO test1 VALUES(1,2)}} msg]
+  lappend v $msg
+} {1 {table test1 has 3 columns but 2 values were supplied}}
+
+do_test insert-1.3b {
+  set v [catch {execsql {INSERT INTO test1 VALUES(1,2,3,4)}} msg]
+  lappend v $msg
+} {1 {table test1 has 3 columns but 4 values were supplied}}
+
+do_test insert-1.4 {
+  set v [catch {execsql {INSERT INTO test1(one,four) VALUES(1,2)}} msg]
+  lappend v $msg
+} {1 {table test1 has no column named four}}
+
+do_test insert-1.5 {
+  execsql {INSERT INTO test1 VALUES(1,2,3)}
+  execsql {SELECT * FROM test1}
+} {1 2 3}
+
+do_test insert-1.5b {
+  execsql {INSERT INTO test1 VALUES(4,5,6)}
+  execsql {SELECT * FROM test1}
+} {1 2 3 4 5 6}
+
+do_test insert-1.5c {
+  execsql {INSERT INTO test1 VALUES(7,8,9)}
+  execsql {SELECT * FROM test1}
+} {1 2 3 4 5 6 7 8 9}

@@ -1,0 +1,28 @@
+# DROP TABLE tests (simplified from SQLite alter/drop patterns)
+
+reset_db
+
+do_execsql_test drop-1.1 {
+  CREATE TABLE droptest(id int);
+  INSERT INTO droptest VALUES(1);
+  DROP TABLE droptest;
+  CREATE TABLE ok(v int);
+  INSERT INTO ok VALUES(1);
+  SELECT v FROM ok;
+} {1}
+
+do_execsql_test drop-1.2 {
+  DROP TABLE IF EXISTS nonexistent_table;
+} {}
+
+do_catchsql_test drop-err-1 {
+  DROP TABLE nonexistent_table;
+} {1 {no such table: nonexistent_table}}
+
+do_execsql_test drop-1.3 {
+  CREATE TABLE a(x int);
+  CREATE TABLE b(y int);
+  DROP TABLE a;
+  INSERT INTO b VALUES(99);
+  SELECT y FROM b;
+} {99}

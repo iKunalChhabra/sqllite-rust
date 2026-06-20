@@ -6,9 +6,17 @@ license.workspace = true
 authors.workspace = true
 description = "SQLite-compatible test runner for sqllite-rust"
 
+[lib]
+name = "sqllite_tests"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sqllite-test"
 path = "src/main.rs"
+
+[[test]]
+name = "run_all"
+path = "tests/run_all.rs"
 
 [dependencies]
 sqllite-core = { workspace = true }
