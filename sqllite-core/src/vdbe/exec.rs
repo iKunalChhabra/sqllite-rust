@@ -1,6 +1,7 @@
 //! VDBE execution engine.
 
 use crate::error::{Result, ResultCode, SqlliteError};
+use crate::pragma::{execute_pragma, PragmaRow};
 use crate::schema::{Schema, Table};
 use crate::storage::btree::{btree_insert_row, Btree, BtreeCursor, BtreeFlags};
 use crate::storage::pager::Pager;
@@ -23,6 +24,8 @@ pub struct Vdbe {
     result_columns: Vec<usize>,
     changes: i64,
     last_rowid: i64,
+    pragma_pending: Vec<PragmaRow>,
+    pragma_row_idx: usize,
 }
 
 struct CursorState {
@@ -51,6 +54,8 @@ impl Vdbe {
             result_columns: Vec::new(),
             changes: 0,
             last_rowid: 0,
+            pragma_pending: Vec::new(),
+            pragma_row_idx: 0,
         }
     }
 
@@ -65,6 +70,12 @@ impl Vdbe {
     pub fn step(&mut self) -> Result<ResultCode> {
         if self.halted {
             return Ok(self.halt_code);
+        }
+
+        if self.pragma_row_idx < self.pragma_pending.len() {
+            self.emit_pragma_row(self.pragma_row_idx);
+            self.pragma_row_idx += 1;
+            return Ok(ResultCode::Row);
         }
 
         while self.pc < self.program.insns.len() {
@@ -108,6 +119,19 @@ impl Vdbe {
             *r = Value::Null;
         }
         self.cursors.clear();
+        self.pragma_pending.clear();
+        self.pragma_row_idx = 0;
+    }
+
+    fn emit_pragma_row(&mut self, idx: usize) {
+        let row = self.pragma_pending[idx].clone();
+        for (i, val) in row.iter().enumerate() {
+            self.set_reg(i as i32, val.clone());
+        }
+        self.result_columns.clear();
+        for i in 0..row.len() {
+            self.result_columns.push(i);
+        }
     }
 
     fn execute(&mut self, insn: &Insn) -> Result<StepResult> {
@@ -274,7 +298,7 @@ impl Vdbe {
                         Value::Blob(b) => b.clone(),
                         _ => return Err(SqlliteError::sql(ResultCode::Internal, "expected record blob")),
                     };
-                    cs.btree.insert(rowid, &record)?;
+                    if insn.p5 != 0 { cs.btree.replace(rowid, &record)?; } else { cs.btree.insert(rowid, &record)?; }
                     self.changes += 1;
                     self.last_rowid = rowid;
                 }
@@ -414,6 +438,24 @@ impl Vdbe {
                         }
                     }
                     self.set_reg(insn.p1, Value::Integer(count));
+                }
+                Ok(StepResult::Continue)
+            }
+            Opcode::Pragma => {
+                if let InsnP4::Pragma { name, value } = &insn.p4 {
+                    let rows = execute_pragma(
+                        name,
+                        value.as_deref(),
+                        &self.pager,
+                        &self.schema.read(),
+                    )?;
+                    self.pragma_pending = rows;
+                    self.pragma_row_idx = 0;
+                    if !self.pragma_pending.is_empty() {
+                        self.emit_pragma_row(0);
+                        self.pragma_row_idx = 1;
+                        return Ok(StepResult::Row);
+                    }
                 }
                 Ok(StepResult::Continue)
             }

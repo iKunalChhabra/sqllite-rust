@@ -3,6 +3,7 @@
 use crate::compile::compile;
 use crate::error::{Result, ResultCode, SqlliteError};
 use crate::io::{OpenFlags, UnixVfs, Vfs};
+use crate::pragma::{execute_pragma, pragma_rows_to_strings, pragma_value_from_expr};
 use crate::schema::{Schema, SharedSchema};
 use crate::storage::pager::{Pager, PagerFlags};
 use crate::types::Value;
@@ -157,6 +158,12 @@ impl Connection {
                 self.pager.commit()?;
                 Ok(vec![])
             }
+            Statement::CreateIndex(create) => {
+                self.pager.begin()?;
+                self.schema.write().create_index(self.pager.clone(), create)?;
+                self.pager.commit()?;
+                Ok(vec![])
+            }
             Statement::DropTable(drop) => {
                 self.pager.begin()?;
                 self.schema.write().drop_table(&drop.name, drop.if_exists)?;
@@ -175,6 +182,16 @@ impl Connection {
             Statement::Rollback => {
                 self.rollback()?;
                 Ok(vec![])
+            }
+            Statement::Pragma(p) => {
+                let value = p.value.as_ref().map(pragma_value_from_expr);
+                let rows = execute_pragma(
+                    &p.name,
+                    value.as_deref(),
+                    &self.pager,
+                    &self.schema.read(),
+                )?;
+                Ok(pragma_rows_to_strings(&rows))
             }
             _ => self.exec_sql(sql),
         }
@@ -278,5 +295,73 @@ mod tests {
             .unwrap();
         let err = conn.execute("INSERT INTO test1 VALUES(1,2)").unwrap_err();
         assert!(err.message().contains("columns"));
+    }
+
+    #[test]
+    fn update_with_where() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE test1(one int, two int, three int)").unwrap();
+        conn.execute("INSERT INTO test1 VALUES(1,2,3)").unwrap();
+        conn.execute("INSERT INTO test1 VALUES(4,5,6)").unwrap();
+        conn.execute("UPDATE test1 SET two=99 WHERE one=1").unwrap();
+        assert_eq!(conn.execute("SELECT * FROM test1 WHERE one=1").unwrap(), vec!["1", "99", "3"]);
+        assert_eq!(conn.execute("SELECT * FROM test1 WHERE one=4").unwrap(), vec!["4", "5", "6"]);
+    }
+
+    #[test]
+    fn update_all_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(a int, b int)").unwrap();
+        conn.execute("INSERT INTO t VALUES(1,10)").unwrap();
+        conn.execute("INSERT INTO t VALUES(2,20)").unwrap();
+        conn.execute("UPDATE t SET b=0").unwrap();
+        assert_eq!(conn.execute("SELECT a, b FROM t ORDER BY a").unwrap(), vec!["1", "0", "2", "0"]);
+    }
+
+    #[test]
+    fn create_index_basic() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(a int, b int)").unwrap();
+        conn.execute("INSERT INTO t VALUES(1,10)").unwrap();
+        conn.execute("INSERT INTO t VALUES(2,20)").unwrap();
+        conn.execute("CREATE INDEX idx_t_a ON t(a)").unwrap();
+        let schema = conn.schema().read();
+        let index = schema.index("idx_t_a").unwrap();
+        assert_eq!(index.table, "t");
+        assert_eq!(index.columns, vec!["a"]);
+        drop(schema);
+        assert_eq!(conn.execute("SELECT a, b FROM t ORDER BY a").unwrap(), vec!["1", "10", "2", "20"]);
+    }
+
+    #[test]
+    fn pragma_journal_mode() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.execute("PRAGMA journal_mode").unwrap(), vec!["delete"]);
+        assert_eq!(conn.execute("PRAGMA journal_mode=WAL").unwrap(), vec!["wal"]);
+    }
+
+    #[test]
+    fn pragma_page_size() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.execute("PRAGMA page_size").unwrap(), vec!["4096"]);
+    }
+
+    #[test]
+    fn pragma_table_info() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE test1(one int, two int, three int)").unwrap();
+        assert_eq!(
+            conn.execute("PRAGMA table_info(test1)").unwrap(),
+            vec![
+                "0", "one", "I", "0", "", "0", "1", "two", "I", "0", "", "0", "2", "three", "I",
+                "0", "", "0"
+            ]
+        );
+    }
+
+    #[test]
+    fn pragma_via_prepare() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.exec_sql("PRAGMA journal_mode").unwrap(), vec!["delete"]);
     }
 }

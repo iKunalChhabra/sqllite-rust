@@ -5,6 +5,7 @@ pub mod connection;
 pub mod constants;
 pub mod error;
 pub mod io;
+pub mod pragma;
 pub mod record;
 pub mod schema;
 pub mod storage;

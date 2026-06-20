@@ -38,6 +38,10 @@ impl Parser {
             return Ok(Statement::Delete(self.parse_delete()?));
         }
         if self.match_token(&Token::Create) {
+            let unique = self.match_token(&Token::Unique);
+            if self.match_token(&Token::Index) {
+                return Ok(Statement::CreateIndex(self.parse_create_index(unique)?));
+            }
             self.expect(&Token::Table)?;
             return Ok(Statement::CreateTable(self.parse_create_table()?));
         }
@@ -269,6 +273,15 @@ impl Parser {
         })
     }
 
+    fn parse_create_index(&mut self, unique: bool) -> Result<CreateIndex, ParseError> {
+        let if_not_exists = self.match_token(&Token::If) && { self.expect(&Token::Not)?; self.expect(&Token::Exists)?; true };
+        let name = self.parse_ident()?; self.expect(&Token::On)?; let table = self.parse_ident()?;
+        self.expect(&Token::LParen)?; let mut columns = Vec::new();
+        loop { columns.push(self.parse_ident()?); if !self.match_token(&Token::Comma) { break; } }
+        self.expect(&Token::RParen)?;
+        Ok(CreateIndex { if_not_exists, unique, name, table, columns })
+    }
+
     fn parse_create_table(&mut self) -> Result<CreateTable, ParseError> {
         let if_not_exists = self.match_token(&Token::If) && {
             self.expect(&Token::Not)?;
@@ -364,6 +377,10 @@ impl Parser {
         let name = self.parse_ident()?;
         let value = if self.match_token(&Token::Eq) {
             Some(self.parse_expr()?)
+        } else if self.match_token(&Token::LParen) {
+            let arg = self.parse_expr()?;
+            self.expect(&Token::RParen)?;
+            Some(arg)
         } else {
             None
         };

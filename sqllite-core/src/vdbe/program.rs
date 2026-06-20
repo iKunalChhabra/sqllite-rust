@@ -147,6 +147,7 @@ pub enum Opcode {
     Filter = 140,
     CursorHint = 141,
     ReleaseReg = 142,
+    Pragma = 143,
 }
 
 /// A single VDBE instruction.
@@ -169,6 +170,7 @@ pub enum InsnP4 {
     Real(f64),
     String(String),
     Subprog(Box<Program>),
+    Pragma { name: String, value: Option<String> },
 }
 
 /// A compiled VDBE program.

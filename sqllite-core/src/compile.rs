@@ -15,6 +15,7 @@ pub fn compile(sql: &str, schema: &Schema) -> Result<Program> {
         Statement::Update(u) => compile_update(&u, schema),
         Statement::Delete(d) => compile_delete(&d, schema),
         Statement::CreateTable(c) => compile_create_table(&c),
+        Statement::CreateIndex(_) => compile_create_index(),
         Statement::DropTable(d) => compile_drop_table(&d),
         Statement::Pragma(p) => compile_pragma(&p),
         Statement::Begin => compile_begin(),
@@ -139,11 +140,6 @@ fn compile_select(select: &Select, schema: &Schema) -> Result<Program> {
         }
     }
 
-    if let Some(addr) = where_skip {
-        let next = prog.insns.len() as i32;
-        prog.patch_p2(addr, next);
-    }
-
     prog.emit(Insn {
         opcode: Opcode::ResultRow,
         p1: n_cols as i32,
@@ -152,6 +148,11 @@ fn compile_select(select: &Select, schema: &Schema) -> Result<Program> {
         p4: InsnP4::None,
         p5: 0,
     });
+
+    if let Some(addr) = where_skip {
+        let next = prog.insns.len() as i32;
+        prog.patch_p2(addr, next);
+    }
 
     let loop_top = (rewind_addr + 1) as i32;
 
@@ -384,23 +385,38 @@ fn compile_delete(delete: &Delete, schema: &Schema) -> Result<Program> {
 }
 
 fn compile_update(update: &Update, schema: &Schema) -> Result<Program> {
-    if schema.table(&update.table).is_none() {
-        return Err(SqlliteError::sql(
-            ResultCode::Error,
-            format!("no such table: {}", update.table),
-        ));
+    let table = schema.table(&update.table).ok_or_else(|| SqlliteError::sql(ResultCode::Error, format!("no such table: {}", update.table)))?;
+    for (col, _) in &update.assignments {
+        if table.column_index(col).is_none() {
+            return Err(SqlliteError::sql(ResultCode::Error, format!("table {} has no column named {col}", update.table)));
+        }
     }
-    let mut prog = Program::new();
-    prog.emit(Insn {
-        opcode: Opcode::Halt,
-        p1: 0,
-        p2: 0,
-        p3: 0,
-        p4: InsnP4::None,
-        p5: 0,
-    });
+    let col_count = table.column_count(); let mut prog = Program::new(); prog.n_reg = col_count + 16;
+    prog.emit(Insn { opcode: Opcode::Init, p1: 0, p2: 1, p3: 0, p4: InsnP4::None, p5: 0 });
+    prog.emit(Insn { opcode: Opcode::Transaction, p1: 0, p2: 0, p3: 0, p4: InsnP4::None, p5: 0 });
+    let cursor = 0;
+    prog.emit(Insn { opcode: Opcode::OpenWrite, p1: cursor, p2: 0, p3: 0, p4: InsnP4::String(update.table.clone()), p5: 0 });
+    let rewind = prog.emit(Insn { opcode: Opcode::Rewind, p1: cursor, p2: 0, p3: 0, p4: InsnP4::None, p5: 0 });
+    let where_skip = if let Some(ref w) = update.where_clause {
+        compile_where_expr(&mut prog, w, table, cursor, 0)?;
+        Some(prog.emit(Insn { opcode: Opcode::IfNot, p1: 0, p2: 0, p3: 0, p4: InsnP4::None, p5: 0 }))
+    } else { None };
+    for j in 0..col_count { prog.emit(Insn { opcode: Opcode::Column, p1: (j + 2) as i32, p2: cursor, p3: j as i32, p4: InsnP4::None, p5: 0 }); }
+    for (col_name, expr) in &update.assignments {
+        let col_idx = table.column_index(col_name).unwrap();
+        compile_expr_with_columns(&mut prog, expr, Some(table), cursor, (col_idx + 2) as i32)?;
+    }
+    prog.emit(Insn { opcode: Opcode::Rowid, p1: 1, p2: cursor, p3: 0, p4: InsnP4::None, p5: 0 });
+    prog.emit(Insn { opcode: Opcode::MakeRecord, p1: col_count as i32, p2: 2, p3: 10, p4: InsnP4::None, p5: 0 });
+    prog.emit(Insn { opcode: Opcode::Insert, p1: 10, p2: cursor, p3: 1, p4: InsnP4::None, p5: 1 });
+    let next_addr = prog.insns.len(); if let Some(addr) = where_skip { prog.patch_p2(addr, next_addr as i32); }
+    prog.emit(Insn { opcode: Opcode::Last, p1: cursor, p2: (rewind + 1) as i32, p3: 0, p4: InsnP4::None, p5: 0 });
+    prog.patch_p2(rewind, prog.insns.len() as i32);
+    prog.emit(Insn { opcode: Opcode::Halt, p1: 0, p2: 0, p3: 0, p4: InsnP4::None, p5: 0 });
     Ok(prog)
 }
+
+fn compile_create_index() -> Result<Program> { Ok(Program { insns: vec![Insn { opcode: Opcode::Halt, p1: 0, p2: 0, p3: 0, p4: InsnP4::None, p5: 0 }], n_reg: 0, read_only: false }) }
 
 fn compile_create_table(create: &CreateTable) -> Result<Program> {
     let mut prog = Program::new();
@@ -463,15 +479,38 @@ fn compile_drop_table(drop: &DropTable) -> Result<Program> {
 fn compile_pragma(pragma: &Pragma) -> Result<Program> {
     let mut prog = Program::new();
     prog.read_only = true;
+    prog.n_reg = 8;
+    let value = pragma.value.as_ref().map(expr_to_pragma_value);
+    prog.emit(Insn {
+        opcode: Opcode::Pragma,
+        p1: 0,
+        p2: 0,
+        p3: 0,
+        p4: InsnP4::Pragma {
+            name: pragma.name.clone(),
+            value,
+        },
+        p5: 0,
+    });
     prog.emit(Insn {
         opcode: Opcode::Halt,
         p1: 0,
         p2: 0,
         p3: 0,
-        p4: InsnP4::String(pragma.name.clone()),
+        p4: InsnP4::None,
         p5: 0,
     });
     Ok(prog)
+}
+
+fn expr_to_pragma_value(expr: &Expr) -> String {
+    match expr {
+        Expr::String(s) => s.clone(),
+        Expr::Ident(s) => s.clone(),
+        Expr::Integer(i) => i.to_string(),
+        Expr::Real(r) => r.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn compile_begin() -> Result<Program> {
