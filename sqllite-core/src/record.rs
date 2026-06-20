@@ -86,6 +86,18 @@ fn encode_value(value: &Value, serial: u64, buf: &mut Vec<u8>) {
     }
 }
 
+pub fn record_byte_length(data: &[u8]) -> Result<usize> {
+    let (header_size, n) = read_varint(data, 0)?;
+    let header_end = n + header_size as usize;
+    if header_end > data.len() { return Err(SqlliteError::sql(ResultCode::Corrupt, "truncated record header")); }
+    let (col_count, m) = read_varint(data, n)?;
+    let mut offset = n + m; let mut serial_types = Vec::with_capacity(col_count as usize);
+    for _ in 0..col_count { let (st, k) = read_varint(data, offset)?; serial_types.push(st); offset += k; }
+    let body = &data[header_end..]; let mut body_offset = 0;
+    for st in serial_types { let (_, consumed) = decode_serial(st, body, body_offset)?; body_offset += consumed; }
+    Ok(header_end + body_offset)
+}
+
 /// Decode a SQLite record blob into values.
 pub fn decode_record(data: &[u8]) -> Result<Vec<Value>> {
     let (header_size, n) = read_varint(data, 0)?;

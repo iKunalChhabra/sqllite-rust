@@ -210,6 +210,15 @@ pub struct DropTable {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndex {
+    pub if_not_exists: bool,
+    pub unique: bool,
+    pub name: String,
+    pub table: String,
+    pub columns: Vec<String>,
+}
+
 /// PRAGMA statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pragma {
@@ -225,6 +234,7 @@ pub enum Statement {
     Update(Update),
     Delete(Delete),
     CreateTable(CreateTable),
+    CreateIndex(CreateIndex),
     DropTable(DropTable),
     Pragma(Pragma),
     Begin,

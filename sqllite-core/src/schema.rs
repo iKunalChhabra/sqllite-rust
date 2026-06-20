@@ -2,11 +2,11 @@
 
 use crate::constants::{SCHEMA_TABLE_NAME, SCHEMA_TABLE_NAME_LEGACY};
 use crate::error::{Result, ResultCode, SqlliteError};
-use crate::storage::btree::{btree_insert_row, Btree, BtreeFlags};
+use crate::storage::btree::{btree_insert_index, btree_insert_row, Btree, BtreeFlags};
 use crate::storage::pager::Pager;
 use crate::types::{Affinity, Value};
 use parking_lot::RwLock;
-use sqllite_parser::ast::{ColumnConstraint, ColumnDef, ColumnType, CreateTable};
+use sqllite_parser::ast::{ColumnConstraint, ColumnDef, ColumnType, CreateIndex, CreateTable};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -20,6 +20,10 @@ pub struct Column {
     pub autoincrement: bool,
     pub default_value: Option<Value>,
 }
+
+/// Index metadata.
+#[derive(Debug, Clone)]
+pub struct Index { pub name: String, pub table: String, pub columns: Vec<String>, pub root_page: u32, pub unique: bool }
 
 /// Table metadata.
 #[derive(Debug, Clone)]
@@ -44,6 +48,7 @@ impl Table {
 #[derive(Default)]
 pub struct Schema {
     tables: HashMap<String, Table>,
+    indexes: HashMap<String, Index>,
     schema_cookie: u32,
     schema_btree: Option<Arc<Btree>>,
 }
@@ -68,6 +73,8 @@ impl Schema {
     pub fn table_mut(&mut self, name: &str) -> Option<&mut Table> {
         self.tables.get_mut(&name.to_lowercase())
     }
+
+    pub fn index(&self, name: &str) -> Option<&Index> { self.indexes.get(&name.to_lowercase()) }
 
     pub fn tables(&self) -> impl Iterator<Item = &Table> {
         self.tables.values()
@@ -117,6 +124,40 @@ impl Schema {
         self.tables.insert(name_lower, table);
         self.bump_cookie();
         Ok(())
+    }
+
+    
+    pub fn create_index(&mut self, pager: Arc<Pager>, create: &CreateIndex) -> Result<()> {
+        let name_lower = create.name.to_lowercase();
+        if self.indexes.contains_key(&name_lower) {
+            if create.if_not_exists { return Ok(()); }
+            return Err(SqlliteError::sql(ResultCode::Error, format!("index {} already exists", create.name)));
+        }
+        let table = self.table(&create.table).ok_or_else(|| SqlliteError::sql(ResultCode::Error, format!("no such table: {}", create.table)))?;
+        for col in &create.columns {
+            if table.column_index(col).is_none() {
+                return Err(SqlliteError::sql(ResultCode::Error, format!("table {} has no column named {col}", create.table)));
+            }
+        }
+        let (index_btree, root_page) = Btree::create_index(pager.clone())?;
+        let table_btree = Btree::new(pager.clone(), table.root_page, BtreeFlags { intkey: true, blobkey: false });
+        let mut cursor = table_btree.cursor();
+        if cursor.first()? {
+            loop {
+                if let Some(rowid) = cursor.key() {
+                    let values = cursor.values()?;
+                    let key_values: Vec<Value> = create.columns.iter().map(|col| {
+                        let idx = table.column_index(col).unwrap();
+                        values.get(idx).cloned().unwrap_or(Value::Null)
+                    }).collect();
+                    btree_insert_index(&index_btree, &key_values, rowid)?;
+                }
+                if !cursor.next()? { break; }
+            }
+        }
+        self.insert_schema_row(pager, &create.name, "index", root_page, &create_index_sql(create))?;
+        self.indexes.insert(name_lower, Index { name: create.name.clone(), table: create.table.clone(), columns: create.columns.clone(), root_page, unique: create.unique });
+        self.bump_cookie(); Ok(())
     }
 
     pub fn drop_table(&mut self, name: &str, if_exists: bool) -> Result<()> {
@@ -307,6 +348,14 @@ fn create_sql(create: &CreateTable) -> String {
     }
     sql.push(')');
     sql
+}
+
+fn create_index_sql(create: &CreateIndex) -> String {
+    let mut sql = String::from("CREATE "); if create.unique { sql.push_str("UNIQUE "); }
+    sql.push_str("INDEX "); if create.if_not_exists { sql.push_str("IF NOT EXISTS "); }
+    sql.push_str(&create.name); sql.push_str(" ON "); sql.push_str(&create.table); sql.push('(');
+    for (i, col) in create.columns.iter().enumerate() { if i > 0 { sql.push_str(", "); } sql.push_str(col); }
+    sql.push(')'); sql
 }
 
 /// Thread-safe schema wrapper.
