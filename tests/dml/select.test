@@ -1,0 +1,30 @@
+# SELECT tests ported from SQLite test/select1.test (single-table subset)
+
+reset_db
+
+do_catchsql_test select-1.1 {
+  SELECT * FROM test1
+} {1 {no such table: test1}}
+
+execsql {CREATE TABLE test1(f1 int, f2 int)}
+execsql {INSERT INTO test1(f1,f2) VALUES(11,22)}
+
+do_test select-1.4 {
+  execsql {SELECT f1 FROM test1}
+} {11}
+
+do_test select-1.5 {
+  execsql {SELECT f2 FROM test1}
+} {22}
+
+do_test select-1.6 {
+  execsql {SELECT f2, f1 FROM test1}
+} {22 11}
+
+do_test select-1.7 {
+  execsql {SELECT f1, f2 FROM test1}
+} {11 22}
+
+do_test select-1.8 {
+  execsql {SELECT * FROM test1}
+} {11 22}

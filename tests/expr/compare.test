@@ -1,0 +1,33 @@
+# Comparison expression tests (simplified from SQLite test/expr.test)
+
+reset_db
+
+do_execsql_test cmp-from-table-1 {
+  CREATE TABLE t(x int);
+  INSERT INTO t VALUES(1);
+  SELECT 1=1 FROM t;
+} {1}
+
+do_execsql_test cmp-from-table-2 {
+  CREATE TABLE t2(x int);
+  INSERT INTO t2 VALUES(1);
+  SELECT 1=2 FROM t2;
+} {0}
+
+do_execsql_test cmp-from-table-3 {
+  CREATE TABLE t3(x int);
+  INSERT INTO t3 VALUES(1);
+  SELECT 3>2 FROM t3;
+} {1}
+
+do_execsql_test cmp-from-table-4 {
+  CREATE TABLE t4(x int);
+  INSERT INTO t4 VALUES(1);
+  SELECT 5>=5 FROM t4;
+} {1}
+
+do_execsql_test cmp-from-table-5 {
+  CREATE TABLE t5(x int);
+  INSERT INTO t5 VALUES(1);
+  SELECT 1!=2 FROM t5;
+} {1}
