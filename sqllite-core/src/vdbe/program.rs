@@ -1,0 +1,196 @@
+//! VDBE instruction representation.
+
+/// VDBE opcodes matching SQLite's virtual machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Opcode {
+    Goto = 0,
+    Gosub = 1,
+    Return = 2,
+    Yield = 3,
+    Halt = 4,
+    HaltIfNull = 5,
+    Integer = 6,
+    Int64 = 7,
+    Real = 8,
+    RealAffinity = 9,
+    String8 = 10,
+    String = 11,
+    Null = 12,
+    Blob = 13,
+    Variable = 14,
+    Move = 15,
+    Copy = 16,
+    SCopy = 17,
+    ResultRow = 18,
+    CollSeq = 19,
+    Add = 20,
+    Subtract = 21,
+    Multiply = 22,
+    Divide = 23,
+    Remainder = 24,
+    Concat = 25,
+    And = 26,
+    Or = 27,
+    Not = 28,
+    BitNot = 29,
+    ShiftLeft = 30,
+    ShiftRight = 31,
+    BitAnd = 32,
+    BitOr = 33,
+    IsNull = 34,
+    NotNull = 35,
+    Ne = 36,
+    Eq = 37,
+    Gt = 38,
+    Le = 39,
+    Lt = 40,
+    Ge = 41,
+    Permutation = 42,
+    Compare = 43,
+    Jump = 44,
+    If = 45,
+    IfNot = 46,
+    Column = 47,
+    Affinity = 48,
+    MakeRecord = 49,
+    Count = 50,
+    ReadCookie = 51,
+    SetCookie = 52,
+    ReopenIdx = 53,
+    OpenRead = 54,
+    OpenWrite = 55,
+    OpenAutoindex = 56,
+    OpenEphemeral = 57,
+    StringForType = 58,
+    Sort = 59,
+    Rewind = 60,
+    Last = 61,
+    SorterSort = 62,
+    SorterNext = 63,
+    IdxInsert = 64,
+    IdxDelete = 65,
+    DeferredSeek = 66,
+    IdxRowid = 67,
+    SeekEnd = 68,
+    IdxGT = 69,
+    IdxGE = 70,
+    IdxLT = 71,
+    IdxLE = 72,
+    Destroy = 73,
+    Clear = 74,
+    CreateBtree = 75,
+    Init = 76,
+    Transaction = 77,
+    ReadTxn = 78,
+    EndCoroutine = 79,
+    YieldCoroutine = 80,
+    Insert = 81,
+    InsertInt = 82,
+    Delete = 83,
+    ResetCount = 84,
+    SorterCompare = 85,
+    SorterData = 86,
+    RowData = 87,
+    Rowid = 88,
+    NullRow = 89,
+    LastInt = 90,
+    SeekGE = 91,
+    SeekGT = 92,
+    SeekLE = 93,
+    SeekLT = 94,
+    NoConflict = 95,
+    NotFound = 96,
+    Found = 97,
+    SeekRowid = 98,
+    NotExists = 99,
+    Sequence = 100,
+    NewRowid = 101,
+    MustBeInt = 102,
+    Realify = 103,
+    IntegrityCk = 104,
+    IdxDrop = 105,
+    IdxRename = 106,
+    DropTable = 107,
+    DropIndex = 108,
+    DropTrigger = 109,
+    IntegrityCk2 = 110,
+    ParseSchema = 111,
+    LoadAnalysis = 112,
+    DropAnalysis = 113,
+    Vacuum = 114,
+    VFilter = 115,
+    VColumn = 116,
+    VNext = 117,
+    VUpdate = 118,
+    VRename = 119,
+    Pagecount = 120,
+    MaxPgcnt = 121,
+    Function = 122,
+    Function0 = 123,
+    Closer = 124,
+    OpenPseudo = 125,
+    ColumnsUsed = 126,
+    SeekScan = 127,
+    SeekHit = 128,
+    Expire = 129,
+    CursorLock = 130,
+    CursorUnlock = 131,
+    Offset = 132,
+    OffsetLimit = 133,
+    AggStep = 134,
+    AggStep1 = 135,
+    AggValue = 136,
+    AggFinal = 137,
+    AggInverse = 138,
+    PureFunc = 139,
+    Filter = 140,
+    CursorHint = 141,
+    ReleaseReg = 142,
+}
+
+/// A single VDBE instruction.
+#[derive(Debug, Clone)]
+pub struct Insn {
+    pub opcode: Opcode,
+    pub p1: i32,
+    pub p2: i32,
+    pub p3: i32,
+    pub p4: InsnP4,
+    pub p5: u16,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum InsnP4 {
+    #[default]
+    None,
+    Int(i32),
+    Int64(i64),
+    Real(f64),
+    String(String),
+    Subprog(Box<Program>),
+}
+
+/// A compiled VDBE program.
+#[derive(Debug, Clone, Default)]
+pub struct Program {
+    pub insns: Vec<Insn>,
+    pub n_reg: usize,
+    pub read_only: bool,
+}
+
+impl Program {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn emit(&mut self, insn: Insn) -> usize {
+        let addr = self.insns.len();
+        self.insns.push(insn);
+        addr
+    }
+
+    pub fn patch_p2(&mut self, addr: usize, target: i32) {
+        self.insns[addr].p2 = target;
+    }
+}

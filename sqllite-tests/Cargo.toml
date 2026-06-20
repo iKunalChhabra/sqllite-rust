@@ -1,0 +1,17 @@
+[package]
+name = "sqllite-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SQLite-compatible test runner for sqllite-rust"
+
+[[bin]]
+name = "sqllite-test"
+path = "src/main.rs"
+
+[dependencies]
+sqllite-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tempfile = { workspace = true }
