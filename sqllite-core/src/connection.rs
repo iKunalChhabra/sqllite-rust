@@ -364,4 +364,95 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         assert_eq!(conn.exec_sql("PRAGMA journal_mode").unwrap(), vec!["delete"]);
     }
+
+    #[test]
+    fn select_count_star() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(id int, val int)").unwrap();
+        conn.execute("INSERT INTO t VALUES(1,10)").unwrap();
+        conn.execute("INSERT INTO t VALUES(2,20)").unwrap();
+        let rows = conn.execute("SELECT COUNT(*) FROM t").unwrap();
+        assert_eq!(rows, vec!["2"]);
+    }
+
+    #[test]
+    fn select_order_by() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(id int, val int)").unwrap();
+        conn.execute("INSERT INTO t VALUES(1,30)").unwrap();
+        conn.execute("INSERT INTO t VALUES(2,10)").unwrap();
+        conn.execute("INSERT INTO t VALUES(3,20)").unwrap();
+        let rows = conn.execute("SELECT val FROM t ORDER BY val").unwrap();
+        assert_eq!(rows, vec!["10", "20", "30"]);
+    }
+
+    #[test]
+    fn select_order_by_desc() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(id int, val int)").unwrap();
+        conn.execute("INSERT INTO t VALUES(1,1)").unwrap();
+        conn.execute("INSERT INTO t VALUES(2,3)").unwrap();
+        conn.execute("INSERT INTO t VALUES(3,2)").unwrap();
+        let rows = conn.execute("SELECT val FROM t ORDER BY val DESC").unwrap();
+        assert_eq!(rows, vec!["3", "2", "1"]);
+    }
+
+    #[test]
+    fn select_group_by_count() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(dept text, salary int)").unwrap();
+        conn.execute("INSERT INTO t VALUES('eng',100)").unwrap();
+        conn.execute("INSERT INTO t VALUES('eng',200)").unwrap();
+        conn.execute("INSERT INTO t VALUES('sales',150)").unwrap();
+        let rows = conn
+            .execute("SELECT dept, COUNT(*) FROM t GROUP BY dept ORDER BY dept")
+            .unwrap();
+        assert_eq!(rows, vec!["eng", "2", "sales", "1"]);
+    }
+
+    #[test]
+    fn select_group_by_sum() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(dept text, salary int)").unwrap();
+        conn.execute("INSERT INTO t VALUES('eng',100)").unwrap();
+        conn.execute("INSERT INTO t VALUES('eng',200)").unwrap();
+        let rows = conn
+            .execute("SELECT dept, SUM(salary) FROM t GROUP BY dept")
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], "eng");
+        assert_eq!(rows[1], "300");
+    }
+
+    #[test]
+    fn select_inner_join() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE a(id int, x int)").unwrap();
+        conn.execute("CREATE TABLE b(id int, y int)").unwrap();
+        conn.execute("INSERT INTO a VALUES(1,10)").unwrap();
+        conn.execute("INSERT INTO a VALUES(2,20)").unwrap();
+        conn.execute("INSERT INTO b VALUES(1,100)").unwrap();
+        conn.execute("INSERT INTO b VALUES(2,200)").unwrap();
+        let rows = conn
+            .execute("SELECT a.x, b.y FROM a INNER JOIN b ON a.id = b.id ORDER BY a.x")
+            .unwrap();
+        assert_eq!(rows, vec!["10", "100", "20", "200"]);
+    }
+
+    #[test]
+    fn select_join_with_where() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE a(id int, x int)").unwrap();
+        conn.execute("CREATE TABLE b(id int, y int)").unwrap();
+        conn.execute("INSERT INTO a VALUES(1,10)").unwrap();
+        conn.execute("INSERT INTO a VALUES(2,20)").unwrap();
+        conn.execute("INSERT INTO b VALUES(1,100)").unwrap();
+        conn.execute("INSERT INTO b VALUES(2,200)").unwrap();
+        let rows = conn
+            .execute(
+                "SELECT a.x, b.y FROM a JOIN b ON a.id = b.id WHERE a.x > 10 ORDER BY a.x",
+            )
+            .unwrap();
+        assert_eq!(rows, vec!["20", "200"]);
+    }
 }

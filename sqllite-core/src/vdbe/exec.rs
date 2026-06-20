@@ -6,7 +6,7 @@ use crate::schema::{Schema, Table};
 use crate::storage::btree::{btree_insert_row, Btree, BtreeCursor, BtreeFlags};
 use crate::storage::pager::Pager;
 use crate::types::Value;
-use crate::vdbe::program::{Insn, InsnP4, Opcode, Program};
+use crate::vdbe::program::{AggFunc, GroupBySpec, Insn, InsnP4, Opcode, Program, SortKey};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,6 +26,8 @@ pub struct Vdbe {
     last_rowid: i64,
     pragma_pending: Vec<PragmaRow>,
     pragma_row_idx: usize,
+    row_buffer: Vec<Vec<Value>>,
+    buffer_idx: usize,
 }
 
 struct CursorState {
@@ -56,6 +58,8 @@ impl Vdbe {
             last_rowid: 0,
             pragma_pending: Vec::new(),
             pragma_row_idx: 0,
+            row_buffer: Vec::new(),
+            buffer_idx: 0,
         }
     }
 
@@ -121,6 +125,8 @@ impl Vdbe {
         self.cursors.clear();
         self.pragma_pending.clear();
         self.pragma_row_idx = 0;
+        self.row_buffer.clear();
+        self.buffer_idx = 0;
     }
 
     fn emit_pragma_row(&mut self, idx: usize) {
@@ -244,8 +250,6 @@ impl Vdbe {
                     let found = cs.cursor.next()?;
                     if found {
                         self.pc = insn.p2 as usize;
-                    } else {
-                        self.pc = (self.program.insns.len()) as usize; // fall through to halt
                     }
                 }
                 Ok(StepResult::Continue)
@@ -459,6 +463,46 @@ impl Vdbe {
                 }
                 Ok(StepResult::Continue)
             }
+            Opcode::RowData => {
+                let n = insn.p1 as usize;
+                let mut row = Vec::with_capacity(n);
+                for i in 0..n {
+                    row.push(self.get_reg(i as i32).clone());
+                }
+                self.row_buffer.push(row);
+                Ok(StepResult::Continue)
+            }
+            Opcode::GroupBy => {
+                if let InsnP4::GroupBy(spec) = &insn.p4 {
+                    self.apply_group_by(spec);
+                }
+                Ok(StepResult::Continue)
+            }
+            Opcode::Sort => {
+                if let InsnP4::SortKeys(keys) = &insn.p4 {
+                    self.sort_buffer(keys);
+                }
+                Ok(StepResult::Continue)
+            }
+            Opcode::BufferRewind => {
+                self.buffer_idx = 0;
+                if self.row_buffer.is_empty() {
+                    self.pc = insn.p2 as usize;
+                }
+                Ok(StepResult::Continue)
+            }
+            Opcode::BufferNext => {
+                if self.buffer_idx >= self.row_buffer.len() {
+                    self.pc = insn.p2 as usize;
+                } else {
+                    let row = self.row_buffer[self.buffer_idx].clone();
+                    for (i, val) in row.into_iter().enumerate() {
+                        self.set_reg(i as i32, val);
+                    }
+                    self.buffer_idx += 1;
+                }
+                Ok(StepResult::Continue)
+            }
             _ => Ok(StepResult::Continue),
         }
     }
@@ -512,6 +556,126 @@ impl Vdbe {
             return Ok(max_id + 1);
         }
         Ok(1)
+    }
+
+    fn sort_buffer(&mut self, keys: &[SortKey]) {
+        self.row_buffer.sort_by(|a, b| {
+            for key in keys {
+                let av = a.get(key.col_index).unwrap_or(&Value::Null);
+                let bv = b.get(key.col_index).unwrap_or(&Value::Null);
+                let ord = av.compare(bv);
+                let ord = if key.desc { ord.reverse() } else { ord };
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+
+    fn apply_group_by(&mut self, spec: &GroupBySpec) {
+        struct AggState {
+            count: i64,
+            sum: Option<f64>,
+            min: Option<Value>,
+            max: Option<Value>,
+        }
+
+        impl AggState {
+            fn new() -> Self {
+                Self {
+                    count: 0,
+                    sum: None,
+                    min: None,
+                    max: None,
+                }
+            }
+
+            fn step(&mut self, func: AggFunc, val: Option<&Value>) {
+                self.count += 1;
+                match func {
+                    AggFunc::Count => {}
+                    AggFunc::Sum => {
+                        if let Some(v) = val {
+                            if !v.is_null() {
+                                *self.sum.get_or_insert(0.0) += v.as_real().unwrap_or(0.0);
+                            }
+                        }
+                    }
+                    AggFunc::Min => {
+                        if let Some(v) = val {
+                            if !v.is_null() {
+                                self.min = Some(match &self.min {
+                                    Some(cur) if v.compare(cur) == std::cmp::Ordering::Less => {
+                                        v.clone()
+                                    }
+                                    Some(cur) => cur.clone(),
+                                    None => v.clone(),
+                                });
+                            }
+                        }
+                    }
+                    AggFunc::Max => {
+                        if let Some(v) = val {
+                            if !v.is_null() {
+                                self.max = Some(match &self.max {
+                                    Some(cur) if v.compare(cur) == std::cmp::Ordering::Greater => {
+                                        v.clone()
+                                    }
+                                    Some(cur) => cur.clone(),
+                                    None => v.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            fn finalize(&self, func: AggFunc) -> Value {
+                match func {
+                    AggFunc::Count => Value::Integer(self.count),
+                    AggFunc::Sum => Value::Real(self.sum.unwrap_or(0.0)),
+                    AggFunc::Min => self.min.clone().unwrap_or(Value::Null),
+                    AggFunc::Max => self.max.clone().unwrap_or(Value::Null),
+                }
+            }
+        }
+
+        let mut groups: HashMap<String, (Vec<Value>, Vec<AggState>)> = HashMap::new();
+        let rows = std::mem::take(&mut self.row_buffer);
+
+        for row in rows {
+            let key_vals: Vec<Value> = spec
+                .key_indices
+                .iter()
+                .map(|&i| row.get(i).cloned().unwrap_or(Value::Null))
+                .collect();
+            let key_str: String = key_vals
+                .iter()
+                .map(|v| v.to_text())
+                .collect::<Vec<_>>()
+                .join("\x1f");
+
+            let entry = groups
+                .entry(key_str)
+                .or_insert_with(|| (key_vals.clone(), spec.aggs.iter().map(|_| AggState::new()).collect()));
+
+            for (agg, state) in spec.aggs.iter().zip(entry.1.iter_mut()) {
+                let val = agg.col_index.and_then(|i| row.get(i));
+                state.step(agg.func, val);
+            }
+        }
+
+        let mut out = Vec::new();
+        for (_, (key, states)) in groups {
+            let mut row = key;
+            for (agg, state) in spec.aggs.iter().zip(states.iter()) {
+                row.push(state.finalize(agg.func));
+            }
+            out.push(row);
+        }
+        self.row_buffer = out;
+        self.buffer_idx = 0;
     }
 }
 

@@ -1,10 +1,15 @@
 //! SQL to VDBE code generation.
 
+#[path = "compile_select.rs"]
+mod compile_select;
+
 use crate::error::{Result, ResultCode, SqlliteError};
 use crate::schema::Schema;
 use crate::vdbe::program::{Insn, InsnP4, Opcode, Program};
 use sqllite_parser::ast::*;
 use sqllite_parser::parse_one;
+
+use compile_select::compile_select;
 
 /// Compile a SQL statement into a VDBE program.
 pub fn compile(sql: &str, schema: &Schema) -> Result<Program> {
@@ -22,162 +27,6 @@ pub fn compile(sql: &str, schema: &Schema) -> Result<Program> {
         Statement::Commit => compile_commit(),
         Statement::Rollback => compile_rollback(),
     }
-}
-
-fn compile_select(select: &Select, schema: &Schema) -> Result<Program> {
-    let table_name = match &select.from {
-        Some(TableRef::Table { name, .. }) => name.clone(),
-        _ => {
-            return Err(SqlliteError::sql(
-                ResultCode::Error,
-                "SELECT requires a FROM clause",
-            ));
-        }
-    };
-
-    if schema.table(&table_name).is_none() {
-        return Err(SqlliteError::sql(
-            ResultCode::Error,
-            format!("no such table: {table_name}"),
-        ));
-    }
-
-    let mut prog = Program::new();
-    prog.read_only = true;
-    prog.n_reg = 8;
-
-    prog.emit(Insn {
-        opcode: Opcode::Init,
-        p1: 0,
-        p2: 1,
-        p3: 0,
-        p4: InsnP4::None,
-        p5: 0,
-    });
-
-    let cursor = 0;
-    prog.emit(Insn {
-        opcode: Opcode::OpenRead,
-        p1: cursor,
-        p2: 0,
-        p3: 0,
-        p4: InsnP4::String(table_name.clone()),
-        p5: 0,
-    });
-
-    let rewind_addr = prog.emit(Insn {
-        opcode: Opcode::Rewind,
-        p1: cursor,
-        p2: 0, // patched
-        p3: 0,
-        p4: InsnP4::None,
-        p5: 0,
-    });
-
-    // WHERE clause filter
-    let where_skip = if let Some(ref w) = select.where_clause {
-        compile_where_expr(
-            &mut prog,
-            w,
-            schema.table(&table_name).unwrap(),
-            cursor,
-            1,
-        )?;
-        let addr = prog.emit(Insn {
-            opcode: Opcode::IfNot,
-            p1: 1,
-            p2: 0,
-            p3: 0,
-            p4: InsnP4::None,
-            p5: 0,
-        });
-        Some(addr)
-    } else {
-        None
-    };
-
-    // Load columns
-    let n_cols = if select.columns.iter().any(|c| matches!(c.expr, Expr::Star)) {
-        schema.table(&table_name).unwrap().column_count()
-    } else {
-        select.columns.len()
-    };
-
-    let mut col_reg = 0i32;
-    for col in &select.columns {
-        match &col.expr {
-            Expr::Star => {
-                let table = schema.table(&table_name).unwrap();
-                for j in 0..table.column_count() {
-                    prog.emit(Insn {
-                        opcode: Opcode::Column,
-                        p1: col_reg,
-                        p2: cursor,
-                        p3: j as i32,
-                        p4: InsnP4::None,
-                        p5: 0,
-                    });
-                    col_reg += 1;
-                }
-            }
-            Expr::Ident(name) | Expr::QualifiedIdent { column: name, .. } => {
-                let table = schema.table(&table_name).unwrap();
-                let col_idx = table.column_index(name).unwrap_or(0) as i32;
-                prog.emit(Insn {
-                    opcode: Opcode::Column,
-                    p1: col_reg,
-                    p2: cursor,
-                    p3: col_idx,
-                    p4: InsnP4::None,
-                    p5: 0,
-                });
-                col_reg += 1;
-            }
-            expr => {
-                compile_expr(&mut prog, expr, col_reg)?;
-                col_reg += 1;
-            }
-        }
-    }
-
-    prog.emit(Insn {
-        opcode: Opcode::ResultRow,
-        p1: n_cols as i32,
-        p2: 0,
-        p3: 0,
-        p4: InsnP4::None,
-        p5: 0,
-    });
-
-    if let Some(addr) = where_skip {
-        let next = prog.insns.len() as i32;
-        prog.patch_p2(addr, next);
-    }
-
-    let loop_top = (rewind_addr + 1) as i32;
-
-    prog.emit(Insn {
-        opcode: Opcode::Last,
-        p1: cursor,
-        p2: loop_top,
-        p3: 0,
-        p4: InsnP4::None,
-        p5: 0,
-    });
-
-    let halt_addr = prog.insns.len();
-    prog.patch_p2(rewind_addr, halt_addr as i32);
-
-    prog.emit(Insn {
-        opcode: Opcode::Halt,
-        p1: 0,
-        p2: 0,
-        p3: 0,
-        p4: InsnP4::None,
-        p5: 0,
-    });
-
-    Ok(prog)
 }
 
 fn compile_insert(insert: &Insert, schema: &Schema) -> Result<Program> {
@@ -619,7 +468,7 @@ fn compile_where_expr(
     Ok(())
 }
 
-fn compile_expr(prog: &mut Program, expr: &Expr, reg: i32) -> Result<()> {
+pub(crate) fn compile_expr(prog: &mut Program, expr: &Expr, reg: i32) -> Result<()> {
     match expr {
         Expr::Null => {
             prog.emit(Insn {

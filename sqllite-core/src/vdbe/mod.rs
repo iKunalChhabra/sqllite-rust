@@ -4,4 +4,4 @@ mod exec;
 pub mod program;
 
 pub use exec::Vdbe;
-pub use program::{Insn, InsnP4, Opcode, Program};
+pub use program::{AggFunc, AggSpec, GroupBySpec, Insn, InsnP4, Opcode, Program, SortKey};

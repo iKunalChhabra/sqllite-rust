@@ -148,6 +148,39 @@ pub enum Opcode {
     CursorHint = 141,
     ReleaseReg = 142,
     Pragma = 143,
+    BufferRewind = 144,
+    BufferNext = 145,
+    GroupBy = 146,
+}
+
+/// Aggregate function kind for GROUP BY processing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Min,
+    Max,
+}
+
+/// One aggregate in a GROUP BY specification.
+#[derive(Debug, Clone)]
+pub struct AggSpec {
+    pub func: AggFunc,
+    pub col_index: Option<usize>,
+}
+
+/// GROUP BY metadata carried in instruction p4.
+#[derive(Debug, Clone)]
+pub struct GroupBySpec {
+    pub key_indices: Vec<usize>,
+    pub aggs: Vec<AggSpec>,
+}
+
+/// ORDER BY sort key.
+#[derive(Debug, Clone)]
+pub struct SortKey {
+    pub col_index: usize,
+    pub desc: bool,
 }
 
 /// A single VDBE instruction.
@@ -171,6 +204,8 @@ pub enum InsnP4 {
     String(String),
     Subprog(Box<Program>),
     Pragma { name: String, value: Option<String> },
+    SortKeys(Vec<SortKey>),
+    GroupBy(GroupBySpec),
 }
 
 /// A compiled VDBE program.

@@ -168,8 +168,9 @@ impl Parser {
             None
         };
         let mut left = TableRef::Table { name, alias };
-        while self.match_token(&Token::Join) || self.match_join_type() {
-            let join_type = self.current_join_type();
+        while self.at_join() {
+            let join_type = self.parse_join_type();
+            self.expect(&Token::Join)?;
             let right_name = self.parse_ident()?;
             let right_alias = if self.check_ident() && !self.is_join_keyword() {
                 Some(self.parse_ident()?)
@@ -686,6 +687,25 @@ impl Parser {
             Ok(())
         } else {
             self.error(&format!("expected {:?}", std::mem::discriminant(token)))
+        }
+    }
+
+    fn at_join(&self) -> bool {
+        matches!(
+            self.current_token().map(|t| &t.token),
+            Some(Token::Join) | Some(Token::Inner) | Some(Token::Left) | Some(Token::Cross)
+        )
+    }
+
+    fn parse_join_type(&mut self) -> JoinType {
+        if self.match_token(&Token::Cross) {
+            JoinType::Cross
+        } else if self.match_token(&Token::Left) {
+            JoinType::Left
+        } else if self.match_token(&Token::Inner) {
+            JoinType::Inner
+        } else {
+            JoinType::Inner
         }
     }
 
