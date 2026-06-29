@@ -121,11 +121,10 @@ impl Pager {
         page[102] = 0;
         page[103] = 0;
         page[104] = 0;
-        page[105] = 0;
         let content_start = page_size as u16;
-        page[106] = (content_start >> 8) as u8;
-        page[107] = content_start as u8;
-        page[108] = 0;
+        page[105] = (content_start >> 8) as u8;
+        page[106] = content_start as u8;
+        page[107] = 0;
         self.write_page_direct(ROOT_PAGE, &page)?;
         *self.page_count.lock() = 1;
         Ok(())
@@ -306,23 +305,37 @@ impl Pager {
             }
         }
 
-        if let Some(page1) = self.cache.lock().get(&ROOT_PAGE).cloned() {
-            let mut header_page = page1.data.clone();
-            {
-                let mut header = self.header.lock();
-                header.database_size = db_size;
-                header.change_counter += 1;
-                header.write(&mut header_page);
-            }
-            if self.journal_mode() == JournalMode::Wal && !self.memory {
-                if let Some(wal) = self.wal.lock().as_mut() {
-                    wal.append_frame(ROOT_PAGE, &header_page, db_size)?;
-                    wal.sync()?;
-                }
-            } else {
-                self.write_page_direct(ROOT_PAGE, &header_page)?;
-            }
+        {
+            let mut header = self.header.lock();
+            header.database_size = db_size;
+            header.change_counter += 1;
         }
+
+        let page_size = self.page_size() as usize;
+        let mut header_page = if let Some(page1) = self.cache.lock().get(&ROOT_PAGE) {
+            page1.data.clone()
+        } else {
+            let mut data = vec![0u8; page_size];
+            read_exact_at(self.file.lock().as_mut(), 0, &mut data)?;
+            data
+        };
+        self.header.lock().write(&mut header_page);
+        if self.journal_mode() == JournalMode::Wal && !self.memory {
+            if let Some(wal) = self.wal.lock().as_mut() {
+                wal.append_frame(ROOT_PAGE, &header_page, db_size)?;
+                wal.sync()?;
+            }
+        } else {
+            self.write_page_direct(ROOT_PAGE, &header_page)?;
+        }
+        self.cache.lock().insert(
+            ROOT_PAGE,
+            Page {
+                pgno: ROOT_PAGE,
+                data: header_page,
+                dirty: false,
+            },
+        );
 
         for page in self.cache.lock().values_mut() {
             page.dirty = false;

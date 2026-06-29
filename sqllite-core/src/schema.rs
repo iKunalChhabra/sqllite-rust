@@ -1,12 +1,13 @@
 //! Database schema catalog.
 
-use crate::constants::{SCHEMA_TABLE_NAME, SCHEMA_TABLE_NAME_LEGACY};
+use crate::constants::{ROOT_PAGE, SCHEMA_TABLE_NAME, SCHEMA_TABLE_NAME_LEGACY};
 use crate::error::{Result, ResultCode, SqlliteError};
 use crate::storage::btree::{btree_insert_index, btree_insert_row, Btree, BtreeFlags};
 use crate::storage::pager::Pager;
 use crate::types::{Affinity, Value};
 use parking_lot::RwLock;
-use sqllite_parser::ast::{ColumnConstraint, ColumnDef, ColumnType, CreateIndex, CreateTable};
+use sqllite_parser::ast::{ColumnConstraint, ColumnDef, ColumnType, CreateIndex, CreateTable, Statement};
+use sqllite_parser::parse_one;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -178,18 +179,16 @@ impl Schema {
 
     fn insert_schema_row(
         &mut self,
-        pager: Arc<Pager>,
+        _pager: Arc<Pager>,
         name: &str,
         obj_type: &str,
         root_page: u32,
         sql: &str,
     ) -> Result<()> {
-        // Ensure schema btree exists
-        if self.schema_btree.is_none() {
-            let (btree, _) = Btree::create_table(pager.clone())?;
-            self.schema_btree = Some(Arc::new(btree));
-        }
-        let btree = self.schema_btree.as_ref().unwrap();
+        let btree = self
+            .schema_btree
+            .as_ref()
+            .ok_or_else(|| SqlliteError::sql(ResultCode::Internal, "schema btree not initialized"))?;
         let rowid = self.next_schema_rowid(btree)?;
         btree_insert_row(
             btree,
@@ -222,61 +221,134 @@ impl Schema {
     }
 
     pub fn init_schema_table(&mut self, pager: Arc<Pager>) -> Result<()> {
-        if self.schema_btree.is_none() {
-            let (btree, root_page) = Btree::create_table(pager)?;
-            self.schema_btree = Some(Arc::new(btree));
-            // Register sqlite_schema as a virtual table entry
-            let schema_table = Table {
-                name: SCHEMA_TABLE_NAME.into(),
-                root_page,
-                columns: vec![
-                    Column {
-                        name: "type".into(),
-                        affinity: Affinity::Text,
-                        not_null: false,
-                        primary_key: false,
-                        autoincrement: false,
-                        default_value: None,
-                    },
-                    Column {
-                        name: "name".into(),
-                        affinity: Affinity::Text,
-                        not_null: false,
-                        primary_key: false,
-                        autoincrement: false,
-                        default_value: None,
-                    },
-                    Column {
-                        name: "tbl_name".into(),
-                        affinity: Affinity::Text,
-                        not_null: false,
-                        primary_key: false,
-                        autoincrement: false,
-                        default_value: None,
-                    },
-                    Column {
-                        name: "rootpage".into(),
-                        affinity: Affinity::Integer,
-                        not_null: false,
-                        primary_key: false,
-                        autoincrement: false,
-                        default_value: None,
-                    },
-                    Column {
-                        name: "sql".into(),
-                        affinity: Affinity::Text,
-                        not_null: false,
-                        primary_key: false,
-                        autoincrement: false,
-                        default_value: None,
-                    },
-                ],
-                rowid_alias: Some("rowid".into()),
-            };
-            self.tables
-                .insert(SCHEMA_TABLE_NAME.to_lowercase(), schema_table);
+        let btree = Btree::new(
+            pager.clone(),
+            ROOT_PAGE,
+            BtreeFlags {
+                intkey: true,
+                blobkey: false,
+            },
+        );
+        self.schema_btree = Some(Arc::new(btree));
+
+        let schema_table = Table {
+            name: SCHEMA_TABLE_NAME.into(),
+            root_page: ROOT_PAGE,
+            columns: vec![
+                Column {
+                    name: "type".into(),
+                    affinity: Affinity::Text,
+                    not_null: false,
+                    primary_key: false,
+                    autoincrement: false,
+                    default_value: None,
+                },
+                Column {
+                    name: "name".into(),
+                    affinity: Affinity::Text,
+                    not_null: false,
+                    primary_key: false,
+                    autoincrement: false,
+                    default_value: None,
+                },
+                Column {
+                    name: "tbl_name".into(),
+                    affinity: Affinity::Text,
+                    not_null: false,
+                    primary_key: false,
+                    autoincrement: false,
+                    default_value: None,
+                },
+                Column {
+                    name: "rootpage".into(),
+                    affinity: Affinity::Integer,
+                    not_null: false,
+                    primary_key: false,
+                    autoincrement: false,
+                    default_value: None,
+                },
+                Column {
+                    name: "sql".into(),
+                    affinity: Affinity::Text,
+                    not_null: false,
+                    primary_key: false,
+                    autoincrement: false,
+                    default_value: None,
+                },
+            ],
+            rowid_alias: Some("rowid".into()),
+        };
+        self.tables
+            .insert(SCHEMA_TABLE_NAME.to_lowercase(), schema_table);
+
+        self.load_schema_from_btree()?;
+        Ok(())
+    }
+
+    fn load_schema_from_btree(&mut self) -> Result<()> {
+        let btree = self.schema_btree.as_ref().unwrap().clone();
+        let mut cursor = btree.cursor();
+        if !cursor.first()? {
+            return Ok(());
+        }
+        loop {
+            let values = cursor.values()?;
+            if values.len() >= 5 {
+                let obj_type = values[0].as_text().unwrap_or("");
+                let name = values[1].as_text().unwrap_or("");
+                let root_page = values[3].as_integer().unwrap_or(0) as u32;
+                let sql = values[4].as_text().unwrap_or("");
+
+                if obj_type == "table" {
+                    let name_lower = name.to_lowercase();
+                    if name_lower != SCHEMA_TABLE_NAME && name_lower != SCHEMA_TABLE_NAME_LEGACY {
+                        if !sql.is_empty() {
+                            if let Ok(Statement::CreateTable(create)) = parse_one(sql) {
+                                self.register_table_from_create(create, root_page);
+                            }
+                        }
+                    }
+                } else if obj_type == "index" {
+                    let name_lower = name.to_lowercase();
+                    if !sql.is_empty() {
+                        if let Ok(Statement::CreateIndex(create)) = parse_one(sql) {
+                            self.indexes.insert(
+                                name_lower,
+                                Index {
+                                    name: create.name.clone(),
+                                    table: create.table.clone(),
+                                    columns: create.columns.clone(),
+                                    root_page,
+                                    unique: create.unique,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            if !cursor.next()? {
+                break;
+            }
         }
         Ok(())
+    }
+
+    fn register_table_from_create(&mut self, create: CreateTable, root_page: u32) {
+        let name_lower = create.name.to_lowercase();
+        let columns = create
+            .columns
+            .iter()
+            .map(column_def_to_column)
+            .collect::<Vec<_>>();
+        self.tables.insert(
+            name_lower,
+            Table {
+                name: create.name.clone(),
+                root_page,
+                columns,
+                rowid_alias: None,
+            },
+        );
     }
 }
 
