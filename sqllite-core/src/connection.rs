@@ -89,6 +89,7 @@ impl Connection {
             sql: sql.to_string(),
             connection_schema: self.schema.clone(),
             connection_pager: self.pager.clone(),
+            autocommit: !self.in_transaction,
         })
     }
 
@@ -204,14 +205,14 @@ pub struct StatementHandle {
     sql: String,
     connection_schema: SharedSchema,
     connection_pager: Arc<Pager>,
+    autocommit: bool,
 }
 
 impl StatementHandle {
     pub fn step(&mut self) -> Result<ResultCode> {
         let rc = self.vdbe.step()?;
-        if rc == ResultCode::Done {
-            // Commit if not in explicit transaction
-            if !self.connection_pager.in_transaction() {
+        if rc == ResultCode::Done && self.autocommit {
+            if self.connection_pager.in_transaction() {
                 let _ = self.connection_pager.commit();
             }
         }
@@ -454,5 +455,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows, vec!["20", "200"]);
+    }
+
+    #[test]
+    fn file_persistence() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        {
+            let mut conn = Connection::open(path).unwrap();
+            conn.execute("CREATE TABLE items (id int, name text)").unwrap();
+            conn.execute("INSERT INTO items VALUES (1, 'Widget')").unwrap();
+            conn.execute("INSERT INTO items VALUES (2, 'Gadget')").unwrap();
+        }
+        {
+            let mut conn = Connection::open(path).unwrap();
+            assert!(conn.schema().read().table("items").is_some());
+            let rows = conn.execute("SELECT * FROM items").unwrap();
+            assert_eq!(rows, vec!["1", "Widget", "2", "Gadget"]);
+        }
+    }
+
+    #[test]
+    fn large_insert_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap();
+        {
+            let mut conn = Connection::open(path).unwrap();
+            conn.execute("CREATE TABLE t(v int)").unwrap();
+            for i in 1..=500i64 {
+                conn.execute(&format!("INSERT INTO t VALUES ({i})")).unwrap();
+            }
+        }
+        {
+            let mut conn = Connection::open(path).unwrap();
+            let count = conn.execute("SELECT COUNT(*) FROM t").unwrap();
+            assert_eq!(count, vec!["500"]);
+        }
     }
 }

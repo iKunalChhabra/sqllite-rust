@@ -302,7 +302,17 @@ impl Vdbe {
                         Value::Blob(b) => b.clone(),
                         _ => return Err(SqlliteError::sql(ResultCode::Internal, "expected record blob")),
                     };
-                    if insn.p5 != 0 { cs.btree.replace(rowid, &record)?; } else { cs.btree.insert(rowid, &record)?; }
+                    if insn.p5 != 0 {
+                        cs.btree.replace(rowid, &record)?;
+                    } else {
+                        cs.btree.insert(rowid, &record)?;
+                    }
+                    let table_name = cs.table.clone();
+                    let new_root = cs.btree.root_page();
+                    drop(cs);
+                    self.schema
+                        .write()
+                        .set_table_root_page(&table_name, new_root)?;
                     self.changes += 1;
                     self.last_rowid = rowid;
                 }
