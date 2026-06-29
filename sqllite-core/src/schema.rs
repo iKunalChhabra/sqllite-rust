@@ -4,6 +4,7 @@ use crate::constants::{ROOT_PAGE, SCHEMA_TABLE_NAME, SCHEMA_TABLE_NAME_LEGACY};
 use crate::error::{Result, ResultCode, SqlliteError};
 use crate::storage::btree::{btree_insert_index, btree_insert_row, Btree, BtreeFlags};
 use crate::storage::pager::Pager;
+use crate::record::encode_record;
 use crate::types::{Affinity, Value};
 use parking_lot::RwLock;
 use sqllite_parser::ast::{ColumnConstraint, ColumnDef, ColumnType, CreateIndex, CreateTable, Statement};
@@ -174,6 +175,48 @@ impl Schema {
         }
         self.tables.remove(&name_lower);
         self.bump_cookie();
+        Ok(())
+    }
+
+    pub fn set_table_root_page(
+        &mut self,
+        name: &str,
+        root_page: u32,
+    ) -> Result<()> {
+        let name_lower = name.to_lowercase();
+        let Some(table) = self.tables.get(&name_lower) else {
+            return Ok(());
+        };
+        if table.root_page == root_page {
+            return Ok(());
+        }
+        self.tables.get_mut(&name_lower).unwrap().root_page = root_page;
+
+        let btree = self
+            .schema_btree
+            .as_ref()
+            .ok_or_else(|| SqlliteError::sql(ResultCode::Internal, "schema btree not initialized"))?;
+        let mut cursor = btree.cursor();
+        if cursor.first()? {
+            loop {
+                let values = cursor.values()?;
+                if values.len() >= 5 {
+                    let obj_type = values[0].as_text().unwrap_or("");
+                    let obj_name = values[1].as_text().unwrap_or("");
+                    if obj_type == "table" && obj_name.eq_ignore_ascii_case(name) {
+                        if let Some(rowid) = cursor.key() {
+                            let mut updated = values;
+                            updated[3] = Value::Integer(root_page as i64);
+                            btree.replace(rowid, &encode_record(&updated))?;
+                        }
+                        break;
+                    }
+                }
+                if !cursor.next()? {
+                    break;
+                }
+            }
+        }
         Ok(())
     }
 
