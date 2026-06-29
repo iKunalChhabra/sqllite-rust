@@ -21,8 +21,13 @@ struct ColumnRef {
     col_idx: usize,
 }
 
+enum RowSource {
+    Column(ColumnRef),
+    Expr(Expr),
+}
+
 struct SelectPlan {
-    row_sources: Vec<ColumnRef>,
+    row_sources: Vec<RowSource>,
     row_width: usize,
     output_width: usize,
     has_aggregates: bool,
@@ -125,7 +130,7 @@ pub fn compile_select(select: &Select, schema: &Schema) -> Result<Program> {
         });
 
         let where_skip = compile_optional_where(&mut prog, select, schema, &tables, 1)?;
-        compile_row_load(&mut prog, &plan, &tables)?;
+        compile_row_load(&mut prog, &plan, &tables, schema)?;
         emit_scan_result(&mut prog, &plan, needs_buffer);
 
         let inner_next = prog.insns.len() as i32;
@@ -158,7 +163,7 @@ pub fn compile_select(select: &Select, schema: &Schema) -> Result<Program> {
         });
     } else {
         let where_skip = compile_optional_where(&mut prog, select, schema, &tables, 1)?;
-        compile_row_load(&mut prog, &plan, &tables)?;
+        compile_row_load(&mut prog, &plan, &tables, schema)?;
         emit_scan_result(&mut prog, &plan, needs_buffer);
 
         let loop_next = prog.insns.len() as i32;
@@ -461,15 +466,18 @@ fn build_select_plan(
                     }
                     let table = schema.table(&tables[0].name).unwrap();
                     for i in 0..table.column_count() {
-                        row_sources.push(ColumnRef {
+                        row_sources.push(RowSource::Column(ColumnRef {
                             table_idx: 0,
                             col_idx: i,
-                        });
+                        }));
                     }
                 }
                 _ => {
-                    let cref = resolve_result_column(&col.expr, schema, tables)?;
-                    row_sources.push(cref);
+                    if let Ok(cref) = resolve_expr_column(&col.expr, schema, tables) {
+                        row_sources.push(RowSource::Column(cref));
+                    } else {
+                        row_sources.push(RowSource::Expr(col.expr.clone()));
+                    }
                 }
             }
         }
@@ -495,8 +503,14 @@ fn build_select_plan(
         .order_by
         .iter()
         .map(|term| {
-            let col_index =
-                resolve_order_index(&term.expr, schema, tables, select, has_aggregates)?;
+            let col_index = resolve_order_index(
+                &term.expr,
+                schema,
+                tables,
+                select,
+                &row_sources,
+                has_aggregates,
+            )?;
             Ok(SortKey {
                 col_index,
                 desc: term.desc,
@@ -514,22 +528,28 @@ fn build_select_plan(
     })
 }
 
-fn group_key_contains(sources: &[ColumnRef], key_indices: &[usize], col: &ColumnRef) -> bool {
+fn group_key_contains(sources: &[RowSource], key_indices: &[usize], col: &ColumnRef) -> bool {
     key_indices.iter().any(|&idx| {
         sources
             .get(idx)
+            .and_then(|s| match s {
+                RowSource::Column(c) => Some(c),
+                RowSource::Expr(_) => None,
+            })
             .map(|k| k.table_idx == col.table_idx && k.col_idx == col.col_idx)
             .unwrap_or(false)
     })
 }
 
-fn push_unique_column(sources: &mut Vec<ColumnRef>, col: ColumnRef) -> usize {
+fn push_unique_column(sources: &mut Vec<RowSource>, col: ColumnRef) -> usize {
     for (i, existing) in sources.iter().enumerate() {
-        if existing.table_idx == col.table_idx && existing.col_idx == col.col_idx {
-            return i;
+        if let RowSource::Column(existing) = existing {
+            if existing.table_idx == col.table_idx && existing.col_idx == col.col_idx {
+                return i;
+            }
         }
     }
-    sources.push(col);
+    sources.push(RowSource::Column(col));
     sources.len() - 1
 }
 
@@ -551,10 +571,16 @@ fn resolve_order_index(
     schema: &Schema,
     tables: &[TableBinding],
     select: &Select,
+    row_sources: &[RowSource],
     has_aggregates: bool,
 ) -> Result<usize> {
+    if let Some(idx) = resolve_order_in_row_sources(expr, schema, tables, row_sources) {
+        return Ok(idx);
+    }
     for (i, rc) in select.columns.iter().enumerate() {
-        if expr_matches(&rc.expr, expr, schema, tables)? {
+        if !matches!(rc.expr, Expr::Star | Expr::QualifiedStar(_))
+            && expr_matches(&rc.expr, expr, schema, tables)?
+        {
             return Ok(i);
         }
     }
@@ -569,6 +595,47 @@ fn resolve_order_index(
         ResultCode::Error,
         "unsupported ORDER BY expression",
     ))
+}
+
+fn resolve_order_in_row_sources(
+    expr: &Expr,
+    schema: &Schema,
+    tables: &[TableBinding],
+    row_sources: &[RowSource],
+) -> Option<usize> {
+    match expr {
+        Expr::Ident(name) => {
+            for (i, src) in row_sources.iter().enumerate() {
+                if let RowSource::Column(col) = src {
+                    let tb = &tables[col.table_idx];
+                    if schema
+                        .table(&tb.name)
+                        .and_then(|t| t.columns.get(col.col_idx))
+                        .is_some_and(|c| c.name.eq_ignore_ascii_case(name))
+                    {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+        Expr::QualifiedIdent { table, column } => {
+            for (i, src) in row_sources.iter().enumerate() {
+                if let RowSource::Column(col) = src {
+                    let tb = &tables[col.table_idx];
+                    if (tb.name.eq_ignore_ascii_case(table) || tb.alias.eq_ignore_ascii_case(table))
+                        && schema
+                            .table(&tb.name)
+                            .and_then(|t| t.columns.get(col.col_idx))
+                            .is_some_and(|c| c.name.eq_ignore_ascii_case(column))
+                    {
+                        return Some(i);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    None
 }
 
 fn expr_matches(
@@ -597,24 +664,6 @@ fn expr_matches(
                 _ => false,
             })
         }
-    }
-}
-
-fn resolve_result_column(
-    expr: &Expr,
-    schema: &Schema,
-    tables: &[TableBinding],
-) -> Result<ColumnRef> {
-    match expr {
-        Expr::Star => Err(SqlliteError::sql(
-            ResultCode::Error,
-            "* is not supported with JOIN or GROUP BY",
-        )),
-        Expr::QualifiedStar(_) => Err(SqlliteError::sql(
-            ResultCode::Error,
-            "qualified * is not supported",
-        )),
-        _ => resolve_expr_column(expr, schema, tables),
     }
 }
 
@@ -676,16 +725,28 @@ fn find_table_index(tables: &[TableBinding], name: &str) -> Result<usize> {
     ))
 }
 
-fn compile_row_load(prog: &mut Program, plan: &SelectPlan, tables: &[TableBinding]) -> Result<()> {
-    for (reg, col) in plan.row_sources.iter().enumerate() {
-        prog.emit(Insn {
-            opcode: Opcode::Column,
-            p1: reg as i32,
-            p2: tables[col.table_idx].cursor,
-            p3: col.col_idx as i32,
-            p4: InsnP4::None,
-            p5: 0,
-        });
+fn compile_row_load(
+    prog: &mut Program,
+    plan: &SelectPlan,
+    tables: &[TableBinding],
+    schema: &Schema,
+) -> Result<()> {
+    for (reg, src) in plan.row_sources.iter().enumerate() {
+        match src {
+            RowSource::Column(col) => {
+                prog.emit(Insn {
+                    opcode: Opcode::Column,
+                    p1: reg as i32,
+                    p2: tables[col.table_idx].cursor,
+                    p3: col.col_idx as i32,
+                    p4: InsnP4::None,
+                    p5: 0,
+                });
+            }
+            RowSource::Expr(expr) => {
+                compile_column_or_expr(prog, expr, schema, tables, reg as i32)?;
+            }
+        }
     }
     Ok(())
 }

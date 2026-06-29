@@ -492,4 +492,27 @@ mod tests {
             assert_eq!(count, vec!["500"]);
         }
     }
+
+    #[test]
+    fn select_literal_expr_from_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t(x int)").unwrap();
+        conn.execute("INSERT INTO t VALUES(1)").unwrap();
+        assert_eq!(conn.execute("SELECT 10+20 FROM t").unwrap(), vec!["30"]);
+        assert_eq!(conn.execute("SELECT 2*3+4 FROM t").unwrap(), vec!["10"]);
+        assert_eq!(conn.execute("SELECT 1=1 FROM t").unwrap(), vec!["1"]);
+        assert_eq!(conn.execute("SELECT 1=2 FROM t").unwrap(), vec!["0"]);
+    }
+
+    #[test]
+    fn select_star_order_by_column() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE test1(one int, two int, three int)").unwrap();
+        conn.execute("INSERT INTO test1 VALUES(1,2,3)").unwrap();
+        conn.execute("INSERT INTO test1 VALUES(4,5,6)").unwrap();
+        assert_eq!(
+            conn.execute("SELECT * FROM test1 ORDER BY one").unwrap(),
+            vec!["1", "2", "3", "4", "5", "6"]
+        );
+    }
 }
